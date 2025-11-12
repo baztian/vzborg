@@ -1223,7 +1223,7 @@ backup | purge)
     cat ${detail_file} >>${summary_file}
     # Send VzBorg statistics mail
     if [ ! -z "${NOTIFY_TO:-}" ]; then
-        if mail -s "$(hostname) - VzBorg ${vzborg_command} statistics." ${NOTIFY_TO} <${summary_file}; then
+        if { printf "Subject: $(hostname) - VzBorg ${vzborg_command} statistics.\n\n"; cat "${summary_file}"; } | sendmail ${NOTIFY_TO}; then
             say "Host $(hostname) - ${vzborg_command} statistics mail sent."
         else
             say "Host $(hostname) - Failed to send ${vzborg_command} statistics mail."
