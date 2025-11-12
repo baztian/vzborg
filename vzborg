@@ -154,6 +154,7 @@ vzborg_backup() {
     local vm_ext=''
     local vm_hostname=''
     local vm_type=''
+    local backup_failures=0
 
     # Virtual machines IDs
     if [[ $vm_ids = "all" ]]; then
@@ -243,7 +244,19 @@ vzborg_backup() {
         say "<- Finished backup of ${vm_type} ${VM_ID} (${vm_hostname})." |& tee -a ${detail_file}
 
         printf "$line_format" $vm_type $VM_ID $(($backup_es / 3600)) $(($backup_es % 3600 / 60)) $(($backup_es % 60)) $backup_status $(($purge_es / 3600)) $(($purge_es % 3600 / 60)) $(($purge_es % 60)) $purge_status $vm_hostname >>${summary_file}
+	if [[ $backup_status == 'failed' ]]; then
+	    backup_failures=$(($backup_failures+1))
+	    backup_failures+=1
+	fi
     done
+    if [[ ${purge_on_backup} = true ]]; then
+	say "Launching borg compact command to free up storage space."
+	borg compact ${borg_extra} -v ${vzborg_repo}
+    fi
+    if [[ $backup_failures -gt 0 ]]; then
+	say "Backup task completed with $backup_failures amount of errors. Exiting with exit code 2."
+	exit 2
+    fi
 }
 vzborg_delete() {
     if [[ ${show_command_help} = true ]]; then
