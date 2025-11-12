@@ -1066,6 +1066,7 @@ vzborg_version() {
 # variables initialization
 readonly archs_prefix=vzborg
 backup_name=''
+config_name='default'
 dry_run=''
 force_overwrite=''
 keep_setting=''
@@ -1103,7 +1104,8 @@ while [ $# -gt 0 ]; do
         shift 2
         ;;
     -c | --config)
-        . /etc/vzborg/${2}
+        config_name="$2"
+        . /etc/vzborg/${config_name}
         shift 2
         ;;
     -d | --dry-run)
@@ -1223,7 +1225,7 @@ backup | purge)
     cat ${detail_file} >>${summary_file}
     # Send VzBorg statistics mail
     if [ ! -z "${NOTIFY_TO:-}" ]; then
-        if { printf "Subject: $(hostname) - VzBorg ${vzborg_command} statistics.\n\n"; cat "${summary_file}"; } | sendmail ${NOTIFY_TO}; then
+        if { printf "Subject: $(hostname) - VzBorg ${vzborg_command} ${config_name} statistics.\n\n"; cat "${summary_file}"; } | sendmail ${NOTIFY_TO}; then
             say "Host $(hostname) - ${vzborg_command} statistics mail sent."
         else
             say "Host $(hostname) - Failed to send ${vzborg_command} statistics mail."
