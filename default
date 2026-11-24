@@ -92,6 +92,11 @@ VZBORG_TEMP_DIR="/tmp"
 #
 # VZBORG_QMRESTORE_DELAY='0'
 
+# BORG CACHE SETTINGS
+#
+# Avoid creating chunks.archive.d cache directories
+export BORG_USE_CHUNKS_ARCHIVE=no
+
 # EXTRA BORG OPTIONS
 #
 # Example for showing borg progress
