@@ -142,7 +142,7 @@ vzborg_backup() {
     local backup_comment=''
     local backup_compression="--compression=${default_compression}"
     local backup_name=''
-    local retention=${keep_setting:-$DEFAULT_KEEP}
+    local retention=${keep_setting:-$default_keep}
     # status
     local backup_status=''
     local purge_status=''
@@ -154,17 +154,24 @@ vzborg_backup() {
     local vm_ext=''
     local vm_hostname=''
     local vm_type=''
-    local backup_failures=0
 
     # Virtual machines IDs
     if [[ $vm_ids = "all" ]]; then
         # containers ids
-        local ctids="$(pct list | awk '{print $1}' | grep -v ID)"
+        local ctids
+        if ! ctids=$(pct list | awk 'NR > 1 {print $1}'); then
+            die 'Failed to list containers.'
+        fi
         # quemu vm ids
-        local vmids="$(qm list | awk '{print $1}' | grep -v ID)"
+        local vmids
+        if ! vmids=$(qm list | awk 'NR > 1 {print $1}'); then
+            die 'Failed to list virtual machines.'
+        fi
         # All ids sorted and cleaned in a string
-        vm_ids=$(echo -e "${vmids}\n${ctids}" | sort -n | tr '\n' ' ' | xargs)
-
+        vm_ids=$(printf '%s\n%s\n' "${vmids}" "${ctids}" | sort -n | tr '\n' ' ' | xargs)
+        if [[ -z $vm_ids ]]; then
+            die 'No guests to backup.'
+        fi
     fi
 
     #say "Checking repository" |& tee -a ${detail_file}
@@ -207,6 +214,8 @@ vzborg_backup() {
                 vm_hostname='No_Virtual_Machine_with_this_ID'
                 backup_status='failed'
                 printf "$line_format" $vm_type $VM_ID 0 0 0 $backup_status 0 0 0 'no' $vm_hostname >>${summary_file}
+                backup_failures=$((backup_failures + 1))
+                job_exit_code=2
                 continue
             fi
         fi
@@ -225,15 +234,20 @@ vzborg_backup() {
             backup_status='ok'
         else
             backup_status='failed'
+            backup_failures=$((backup_failures + 1))
+            job_exit_code=2
         fi
         backup_es=$SECONDS
-        if [[ ${purge_on_backup} = true ]]; then
+        purge_es=0
+        if [[ ${purge_on_backup} = true && ${backup_status} = 'ok' ]]; then
             SECONDS=0
             say "--> Purging" |& tee -a ${detail_file}
             if borg prune ${borg_extra} -v -s --list ${dry_run} ${retention} --prefix ${archs_prefix}-${VM_ID} ${vzborg_repo} |& tee -a ${detail_file}; then
                 purge_status='done'
             else
                 purge_status='failed'
+                purge_failures=$((purge_failures + 1))
+                job_exit_code=2
             fi
             purge_es=$SECONDS
             say "<-- Done Purging" |& tee -a ${detail_file}
@@ -244,18 +258,13 @@ vzborg_backup() {
         say "<- Finished backup of ${vm_type} ${VM_ID} (${vm_hostname})." |& tee -a ${detail_file}
 
         printf "$line_format" $vm_type $VM_ID $(($backup_es / 3600)) $(($backup_es % 3600 / 60)) $(($backup_es % 60)) $backup_status $(($purge_es / 3600)) $(($purge_es % 3600 / 60)) $(($purge_es % 60)) $purge_status $vm_hostname >>${summary_file}
-	if [[ $backup_status == 'failed' ]]; then
-	    backup_failures=$(($backup_failures+1))
-	    backup_failures+=1
-	fi
     done
     if [[ ${purge_on_backup} = true ]]; then
-	say "Launching borg compact command to free up storage space."
-	borg compact ${borg_extra} -v ${vzborg_repo}
-    fi
-    if [[ $backup_failures -gt 0 ]]; then
-	say "Backup task completed with $backup_failures amount of errors. Exiting with exit code 2."
-	exit 2
+        say "Launching borg compact command to free up storage space." |& tee -a "${detail_file}"
+        if ! borg compact ${borg_extra} -v ${vzborg_repo} |& tee -a "${detail_file}"; then
+            compact_failures=$((compact_failures + 1))
+            job_exit_code=2
+        fi
     fi
 }
 vzborg_delete() {
@@ -778,10 +787,11 @@ vzborg_purge() {
         exit
     fi
 
-    local retention=${keep_setting:-$DEFAULT_KEEP}
+    local retention=${keep_setting:-$default_keep}
     local purge_es=0
     local purge_status=''
     local guest=''
+    local guest_lookup_failed=false
     local purge_ids=''
 
     # Check if new restore id was informed, and there is a list of guest to restore.
@@ -791,7 +801,14 @@ vzborg_purge() {
 
     # purge all backups
     if [[ $vm_ids = "all" ]]; then
-        purge_ids=$(borg list ${borg_extra} --format={archive}{NL} "${vzborg_repo}" -P ${archs_prefix}- | grep ${archs_prefix}- | cut -d"-" -f2 | cut -d"-" -f1 | sort | uniq | tr '\n' ' ')
+        local archives
+        if ! archives=$(borg list ${borg_extra} --format={archive}{NL} "${vzborg_repo}" -P ${archs_prefix}-); then
+            die 'Failed to list repository archives.'
+        fi
+        purge_ids=$(printf '%s\n' "${archives}" | awk -F- -v prefix="${archs_prefix}" '$1 == prefix && $2 != "" {print $2}' | sort -u | tr '\n' ' ')
+        if [[ -z $purge_ids ]]; then
+            die 'No guest backups to purge.'
+        fi
     else
         purge_ids=${vm_ids}
     fi
@@ -802,7 +819,12 @@ vzborg_purge() {
     for VM_ID in $purge_ids; do
         say "-> Purging backups of guest ${VM_ID}" |& tee -a ${detail_file};
         # Get guest information from backup
-        guest=$(borg list ${borg_extra} --format="{archive} {bcomment}{NL}" ${vzborg_repo} -P ${archs_prefix}-${VM_ID} | sort -r | head -1 | cut -d"(" -f2  | cut -d")" -f1)
+        guest_lookup_failed=false
+        if ! guest=$(borg list ${borg_extra} --format="{archive} {bcomment}{NL}" ${vzborg_repo} -P ${archs_prefix}-${VM_ID} | sort -r | awk 'NR == 1' | cut -d"(" -f2 | cut -d")" -f1); then
+            say "Failed to list backups of guest ${VM_ID}." |& tee -a "${detail_file}"
+            guest_lookup_failed=true
+            guest=''
+        fi
 
         if [ ! -z "${guest}" ]; then
             guest='('$guest')'            
@@ -812,9 +834,15 @@ vzborg_purge() {
             vm_hostname=${guest_[vm_hostname]}
         else
             vm_type='--'
-            vm_hostname='No_Backup_with_this_ID'
-            prune_status='failed'
-            printf "$line_format" $vm_type $VM_ID 0 0 0 'no' 0 0 0 $prune_status $vm_hostname >>${summary_file}
+            if [[ $guest_lookup_failed = true ]]; then
+                vm_hostname='Backup_list_failed'
+            else
+                vm_hostname='No_Backup_with_this_ID'
+            fi
+            purge_status='failed'
+            printf "$line_format" $vm_type $VM_ID 0 0 0 'no' 0 0 0 $purge_status $vm_hostname >>${summary_file}
+            purge_failures=$((purge_failures + 1))
+            job_exit_code=2
             continue
         fi
 
@@ -823,6 +851,8 @@ vzborg_purge() {
             purge_status='done'
         else
             purge_status='failed'
+            purge_failures=$((purge_failures + 1))
+            job_exit_code=2
         fi
         purge_es=$SECONDS
         printf "$line_format" $vm_type $VM_ID 0 0 0 'no' $(($purge_es / 3600)) $(($purge_es % 3600 / 60)) $(($purge_es % 60)) $purge_status $vm_hostname >>${summary_file}
@@ -1061,6 +1091,50 @@ vzborg_version() {
     # 1.0
 }
 
+# Complete backup and purge reports, including when a command exits unexpectedly.
+finish_job() {
+    local exit_code=$1
+    local result='SUCCESS'
+    trap - EXIT
+    set +e
+
+    if [[ $exit_code -eq 0 && $job_exit_code -ne 0 ]]; then
+        exit_code=$job_exit_code
+    fi
+    if [[ $exit_code -ne 0 ]]; then
+        result='FAILED'
+    fi
+
+    if [[ -n ${summary_file:-} && -f ${summary_file} ]]; then
+        {
+            echo
+            printf 'Overall status: %s\n' "$result"
+            printf 'Failures: backup=%d purge=%d compact=%d\n' "$backup_failures" "$purge_failures" "$compact_failures"
+        } >>"${summary_file}"
+        if [[ -n ${detail_file:-} && -f ${detail_file} ]]; then
+            say "< Host $(hostname) - ${vzborg_command} job ${result}." |& tee -a "${detail_file}"
+        fi
+        echo
+        cat "${summary_file}"
+
+        # Append detailed information
+        if [[ -n ${detail_file:-} && -f ${detail_file} ]]; then
+            cat "${detail_file}" >>"${summary_file}"
+        fi
+        # Send VzBorg statistics mail
+        if [[ -n ${NOTIFY_TO:-} ]]; then
+            if { printf 'Subject: %s - VzBorg %s %s %s statistics.\n\n' "$(hostname)" "${vzborg_command}" "${config_name}" "${result}"; cat "${summary_file}"; } | sendmail ${NOTIFY_TO}; then
+                say "Host $(hostname) - ${vzborg_command} statistics mail sent."
+            else
+                say "Host $(hostname) - Failed to send ${vzborg_command} statistics mail." >&2
+            fi
+        fi
+    fi
+    if [[ -n ${detail_file:-} ]]; then rm -f -- "${detail_file}"; fi
+    if [[ -n ${summary_file:-} ]]; then rm -f -- "${summary_file}"; fi
+    exit "$exit_code"
+}
+
 # VzBorg main body
 
 # variables initialization
@@ -1186,15 +1260,27 @@ fi
 # Execute some code before running the command
 case ${vzborg_command} in
 backup | purge)
-    # create temporary files for summary and detail information
-    detail_file="$(mktemp ${temp_dir}/vzborg.XXXXXX)"
-    summary_file="$(mktemp ${temp_dir}/vzborg.XXXXXX)"
-    header_format="\n%2s  %5s  %8s  %6s  %8s  %6s  %-42s\n"
-    line_format="%2s  %5s  %02d:%02d:%02d  %6s  %02d:%02d:%02d  %6s  %-42s\n"
-    echo '' >>${detail_file}
-    echo "DETAILED VZBORG INFORMATION" >>${detail_file}
-    echo "VZBORG SUMMARY" >>${summary_file}
-    printf "$header_format" "TY" "VMID" "BCK.TIME" "BACKUP" "PUR.TIME" "PURGE" "NAME" >>${summary_file}
+    # Help exits without running a job or sending a report.
+    if [[ ${show_command_help} != true ]]; then
+        backup_failures=0
+        purge_failures=0
+        compact_failures=0
+        job_exit_code=0
+        detail_file=''
+        summary_file=''
+        trap 'finish_job $?' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        # create temporary files for summary and detail information
+        detail_file="$(mktemp "${temp_dir}/vzborg.XXXXXX")"
+        summary_file="$(mktemp "${temp_dir}/vzborg.XXXXXX")"
+        header_format="\n%2s  %5s  %8s  %6s  %8s  %6s  %-42s\n"
+        line_format="%2s  %5s  %02d:%02d:%02d  %6s  %02d:%02d:%02d  %6s  %-42s\n"
+        echo '' >>"${detail_file}"
+        echo "DETAILED VZBORG INFORMATION" >>"${detail_file}"
+        echo "VZBORG SUMMARY" >>"${summary_file}"
+        printf "$header_format" "TY" "VMID" "BCK.TIME" "BACKUP" "PUR.TIME" "PURGE" "NAME" >>"${summary_file}"
+    fi
     ;;
 esac
 
@@ -1213,24 +1299,4 @@ version) vzborg_version ;;
 *) die "Invalid or not given vzborg command. Try \"vzborg help\"" ;;
 esac
 
-# Execute some code after running the command
-case ${vzborg_command} in
-backup | purge)
-    echo "" >>${summary_file}
-    say "< Host $(hostname) - ${vzborg_command} job complete!" |& tee -a ${detail_file}
-    echo
-    cat ${summary_file}
-
-    # Append detailed information
-    cat ${detail_file} >>${summary_file}
-    # Send VzBorg statistics mail
-    if [ ! -z "${NOTIFY_TO:-}" ]; then
-        if { printf "Subject: $(hostname) - VzBorg ${vzborg_command} ${config_name} statistics.\n\n"; cat "${summary_file}"; } | sendmail ${NOTIFY_TO}; then
-            say "Host $(hostname) - ${vzborg_command} statistics mail sent."
-        else
-            say "Host $(hostname) - Failed to send ${vzborg_command} statistics mail."
-        fi
-    fi
-    rm -r ${detail_file} ${summary_file}
-    ;;
-esac
+# Backup and purge reporting runs from the EXIT trap.

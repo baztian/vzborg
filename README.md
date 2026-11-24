@@ -79,6 +79,19 @@ VzBorg accepts one of the following commands:
 |-r (--repository)|repository  |all except help/version     |Borg repository                         |
 |-s (--storage)   |storage     |getdump/restore             |Proxmox storage (default = local)       |
 
+### Backup and purge status
+
+Backup and purge jobs print a per-guest summary and an overall `SUCCESS` or `FAILED` result.
+If `NOTIFY_TO` is configured, the result also appears in the statistics email subject and body.
+A backup job skips the guest's purge if its backup fails. Purge and compact failures make the job fail.
+
+Exit status is `0` for success, `2` for a completed job with backup, purge, or compact failures,
+and `1` for reported setup or usage errors. Unexpected command errors retain their nonzero status;
+interruptions retain their signal exit status. Borg warnings that return a nonzero status count as
+failures. A failed notification is reported on
+standard error but does not change the job exit status. Reports and temporary-file cleanup are attempted
+when the job exits, including on errors and interruptions, once the report files can be created.
+
 ### Configuration file:
 
  `/etc/vzborg/default`
